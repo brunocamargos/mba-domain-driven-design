@@ -109,6 +109,7 @@ import { PartnerCreatedIntegrationEvent } from '../@core/events/domain/events/in
         spotReservationRepo,
         uow,
         paymentGateway,
+        applicationService,
       ) =>
         new OrderService(
           orderRepo,
@@ -117,6 +118,7 @@ import { PartnerCreatedIntegrationEvent } from '../@core/events/domain/events/in
           spotReservationRepo,
           uow,
           paymentGateway,
+          applicationService,
         ),
       inject: [
         'IOrderRepository',
@@ -125,6 +127,7 @@ import { PartnerCreatedIntegrationEvent } from '../@core/events/domain/events/in
         'ISpotReservationRepository',
         'IUnitOfWork',
         PaymentGateway,
+        ApplicationService,
       ],
     },
     {
@@ -134,6 +137,24 @@ import { PartnerCreatedIntegrationEvent } from '../@core/events/domain/events/in
         domainEventManager: DomainEventManager,
       ) => new MyHandlerHandler(partnerRepo, domainEventManager),
       inject: ['IPartnerRepository', DomainEventManager],
+    },
+    {
+      provide: OrderCancelledHandler,
+      useFactory: (
+        eventRepo: IEventRepository,
+        spotReservationRepo: ISpotReservationRepository,
+        domainEventManager: DomainEventManager,
+      ) =>
+        new OrderCancelledHandler(
+          eventRepo,
+          spotReservationRepo,
+          domainEventManager,
+        ),
+      inject: [
+        'IEventRepository',
+        'ISpotReservationRepository',
+        DomainEventManager,
+      ],
     },
   ],
   controllers: [
@@ -163,6 +184,15 @@ export class EventsModule implements OnModuleInit {
         await handler.handle(event);
       });
     });
+    OrderCancelledHandler.listensTo().forEach((eventName: string) => {
+      this.domainEventManager.register(eventName, async (event) => {
+        const handler: OrderCancelledHandler = await this.moduleRef.resolve(
+          OrderCancelledHandler,
+        );
+        await handler.handle(event);
+      });
+    });
+
     this.domainEventManager.registerForIntegrationEvent(
       PartnerCreated.name,
       async (event) => {

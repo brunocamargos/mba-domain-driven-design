@@ -17,6 +17,11 @@ import { EventMysqlRepository } from '../infra/db/repositories/event-mysql.repos
 import { OrderService } from './order.service';
 import { OrderMysqlRepository } from '../infra/db/repositories/order-mysql.repository';
 import { SpotReservationMysqlRepository } from '../infra/db/repositories/spot-reservation-mysql.repository';
+import { PaymentGateway } from './payment.gateway';
+import { ApplicationService } from '../../common/application/application.service';
+import { DomainEventManager } from '../../common/domain/domain-event-manager';
+import { OrderCancelledHandler } from './handlers/order-cancelled.handler';
+import { OrderStatus } from '../domain/entities/order.entity';
 
 test('deve criar uma order', async () => {
   const orm = await MikroORM.init<MySqlDriver>({
@@ -82,6 +87,8 @@ test('deve criar uma order', async () => {
     eventRepo,
     spotReservationRepo,
     unitOfWork,
+    new PaymentGateway(),
+    new ApplicationService(unitOfWork, new DomainEventManager()),
   );
 
   const op1 = orderService.create({
@@ -89,6 +96,7 @@ test('deve criar uma order', async () => {
     section_id: event.sections[0].id.value,
     customer_id: customer.id.value,
     spot_id: event.sections[0].spots[0].id.value,
+    card_token: 'tok_visa',
   });
 
   const op2 = orderService.create({
@@ -96,6 +104,7 @@ test('deve criar uma order', async () => {
     section_id: event.sections[0].id.value,
     customer_id: customer.id.value,
     spot_id: event.sections[0].spots[0].id.value,
+    card_token: 'tok_visa',
   });
 
   try {
@@ -105,6 +114,112 @@ test('deve criar uma order', async () => {
     console.log(await orderRepo.findAll());
     console.log(await spotReservationRepo.findAll());
   }
+
+  await orm.close();
+});
+
+test('deve cancelar uma order e liberar o lugar', async () => {
+  const orm = await MikroORM.init<MySqlDriver>({
+    entities: [
+      CustomerSchema,
+      PartnerSchema,
+      EventSchema,
+      EventSectionSchema,
+      EventSpotSchema,
+      OrderSchema,
+      SpotReservationSchema,
+    ],
+    dbName: 'events',
+    host: 'localhost',
+    port: 3306,
+    user: 'root',
+    password: 'root',
+    type: 'mysql',
+    forceEntityConstructor: true,
+  });
+  await orm.schema.refreshDatabase();
+  const em = orm.em.fork();
+  const unitOfWork = new UnitOfWorkMikroOrm(em);
+  const customerRepo = new CustomerMysqlRepository(em);
+  const partnerRepo = new PartnerMysqlRepository(em);
+  const eventRepo = new EventMysqlRepository(em);
+  const customer = Customer.create({
+    name: 'Customer 1',
+    cpf: '70375887091',
+  });
+  await customerRepo.add(customer);
+
+  const partner = Partner.create({
+    name: 'Partner 1',
+  });
+  await partnerRepo.add(partner);
+
+  const event = partner.initEvent({
+    name: 'Event 1',
+    description: 'Event 1',
+    date: new Date(),
+  });
+
+  event.addSection({
+    name: 'Section 1',
+    description: 'Section 1',
+    price: 100,
+    total_spots: 1,
+  });
+
+  event.publishAll();
+
+  await eventRepo.add(event);
+
+  await unitOfWork.commit();
+  await em.clear();
+
+  const orderRepo = new OrderMysqlRepository(em);
+  const spotReservationRepo = new SpotReservationMysqlRepository(em);
+
+  // registra o handler do mesmo jeito que o EventsModule faz
+  const domainEventManager = new DomainEventManager();
+  OrderCancelledHandler.listensTo().forEach((eventName: string) => {
+    domainEventManager.register(eventName, async (domainEvent) =>
+      new OrderCancelledHandler(
+        eventRepo,
+        spotReservationRepo,
+        domainEventManager,
+      ).handle(domainEvent),
+    );
+  });
+
+  const orderService = new OrderService(
+    orderRepo,
+    customerRepo,
+    eventRepo,
+    spotReservationRepo,
+    unitOfWork,
+    new PaymentGateway(),
+    new ApplicationService(unitOfWork, domainEventManager),
+  );
+
+  const order = await orderService.create({
+    event_id: event.id.value,
+    section_id: event.sections[0].id.value,
+    customer_id: customer.id.value,
+    spot_id: event.sections[0].spots[0].id.value,
+    card_token: 'tok_visa',
+  });
+
+  await orderService.cancel({ order_id: order.id.value });
+
+  em.clear();
+
+  const orderFound = await orderRepo.findById(order.id);
+  expect(orderFound.status).toBe(OrderStatus.CANCELLED);
+
+  const eventFound = await eventRepo.findById(event.id);
+  expect(eventFound.sections[0].spots[0].is_reserved).toBe(false);
+
+  expect(
+    await spotReservationRepo.findById(event.sections[0].spots[0].id),
+  ).toBeNull();
 
   await orm.close();
 });
